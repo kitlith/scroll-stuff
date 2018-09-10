@@ -1,0 +1,11 @@
+[package]
+name = "scroll-stuff"
+version = "0.1.0"
+authors = ["Kitlith <kitlith@kitl.pw>"]
+
+[dependencies]
+byteorder = "1"
+
+[dependencies.scroll]
+version = "0.9.0"
+features = ["derive"]
