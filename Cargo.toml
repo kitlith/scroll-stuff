@@ -2,10 +2,14 @@
 name = "scroll-stuff"
 version = "0.1.0"
 authors = ["Kitlith <kitlith@kitl.pw>"]
+edition = "2018"
 
 [dependencies]
 byteorder = "1"
 
 [dependencies.scroll]
-version = "0.9.0"
+version = "0.10"
 features = ["derive"]
+
+[patch.crates-io]
+"scroll" = { git = 'https://github.com/m4b/scroll' }
