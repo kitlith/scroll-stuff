@@ -1,5 +1,3 @@
-#![feature(try_from)]
-
 use scroll;
 
 use scroll::ctx::{TryFromCtx, TryIntoCtx, MeasureWith};
@@ -31,6 +29,54 @@ impl Endian for BigEndian {
         scroll::Endian::Big
     }
 }
+
+trait IntoInner {
+    type Inner;
+    fn into_inner(self) -> Self::Inner;
+}
+
+trait FromInner {
+    type Inner;
+    fn from_inner(inner: Self::Inner) -> Self;
+}
+
+#[derive(Clone)]
+struct TermWrapper<T>(T);
+
+impl<'a, T, Ctx> TryFromCtx<'a, Ctx> for TermWrapper<T>
+    where Ctx: Copy,
+        T: TryFromCtx<'a, Ctx> + 'a {
+
+    type Error = <T as TryFromCtx<'a, Ctx>>::Error;
+    fn try_from_ctx(src: &'a [u8], ctx: Ctx) -> Result<(Self, usize), Self::Error> {
+        T::try_from_ctx(src, ctx).map(|(val, size)| (TermWrapper(val), size))
+    }
+}
+
+impl<'a, T, Ctx> TryIntoCtx<Ctx> for TermWrapper<T>
+    where Ctx: Copy,
+        T: TryIntoCtx<Ctx> {
+    type Error = <T as TryIntoCtx<Ctx>>::Error;
+    fn try_into_ctx(self, dest: &mut [u8], ctx: Ctx) -> Result<usize, Self::Error> {
+        self.0.try_into_ctx(dest, ctx)
+    }
+}
+
+impl<T> IntoInner for TermWrapper<T> {
+    type Inner = T;
+    fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+impl<T> FromInner for TermWrapper<T> {
+    type Inner = T;
+    fn from_inner(inner: Self::Inner) -> Self {
+        TermWrapper(inner)
+    }
+}
+
+type D<T> = TermWrapper<T>;
 
 // It would be nice if I could just use a () as context rather than scroll::Endian because I don't
 // use it, but the derive macro doesn't allow for that. Should I pass on the endian ctx though?
@@ -90,6 +136,20 @@ impl<Ctx, Data, Length> MeasureWith<Ctx> for LengthData<Data, Length>
     }
 }
 
+impl<Data, Length> IntoInner for LengthData<Data, Length> where Data: IntoInner {
+    type Inner = <Data as IntoInner>::Inner;
+    fn into_inner(self) -> Self::Inner {
+        self.0.into_inner()
+    }
+}
+
+impl<Data, Length> FromInner for LengthData<Data, Length> where Data: FromInner {
+    type Inner = <Data as FromInner>::Inner;
+    fn from_inner(inner: Self::Inner) -> Self {
+        LengthData(Data::from_inner(inner), PhantomData)
+    }
+}
+
 // Reads an entire buffer as a UTF-16 string of specified endian. maybe use StrCtx from scroll in the future?
 #[derive(Clone)]
 struct UTF16<E>(String, PhantomData<E>);
@@ -124,9 +184,17 @@ impl<Ctx, E> MeasureWith<Ctx> for UTF16<E> where E: Endian {
     }
 }
 
-impl<Length, Endian> From<LengthData<UTF16<Endian>, Length>> for String {
-    fn from(src: LengthData<UTF16<Endian>, Length>) -> Self {
-        (src.0).0
+impl<E> IntoInner for UTF16<E> {
+    type Inner = String;
+    fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl<E> FromInner for UTF16<E> {
+    type Inner = String;
+    fn from_inner(inner: String) -> Self {
+        UTF16(inner, PhantomData)
     }
 }
 
@@ -137,39 +205,28 @@ struct EndianWrapper<T, E>(T, PhantomData<E>);
 
 impl<'a, T, E> TryFromCtx<'a, scroll::Endian> for EndianWrapper<T, E>
     where T: TryFromCtx<'a, scroll::Endian>,
-        <T as TryFromCtx<'a, scroll::Endian>>::Error: From<scroll::Error>,
-        scroll::Error: From<<T as TryFromCtx<'a, scroll::Endian>>::Error>,
         E: Endian + 'a {
-    type Error = scroll::Error;
+    type Error = <T as TryFromCtx<'a, scroll::Endian>>::Error;
     fn try_from_ctx(src: &'a [u8], _ctx: scroll::Endian) -> Result<(Self, usize), Self::Error> {
-        let mut read = 0;
-        Ok((EndianWrapper(src.gread_with(&mut read, E::get_val())?, PhantomData), read))
+        T::try_from_ctx(src, E::get_val()).map(|(val, size)| (EndianWrapper(val, PhantomData), size))
     }
 }
 
 impl<'a, T, E> TryIntoCtx<scroll::Endian> for &EndianWrapper<T, E>
     where T: TryIntoCtx<scroll::Endian> + Clone + 'a,
-        <T as TryIntoCtx<scroll::Endian>>::Error: From<scroll::Error>,
-        scroll::Error: From<<T as TryIntoCtx<scroll::Endian>>::Error>,
         E: Endian + 'a {
-    type Error = scroll::Error;
+    type Error = <T as TryIntoCtx<scroll::Endian>>::Error;
     fn try_into_ctx(self, dest: &mut [u8], _ctx: scroll::Endian) -> Result<usize, Self::Error> {
-        let mut size = 0;
-        dest.gwrite_with(self.0.clone(), &mut size, E::get_val())?;
-        Ok(size)
+        self.0.clone().try_into_ctx(dest, E::get_val())
     }
 }
 
 impl<'a, T, E> TryIntoCtx<scroll::Endian> for EndianWrapper<T, E>
-    where T: TryIntoCtx<scroll::Endian> + 'a,
-        <T as TryIntoCtx<scroll::Endian>>::Error: From<scroll::Error>,
-        scroll::Error: From<<T as TryIntoCtx<scroll::Endian>>::Error>,
+    where T: TryIntoCtx<scroll::Endian> + Clone + 'a,
         E: Endian + 'a {
-    type Error = scroll::Error;
+    type Error = <T as TryIntoCtx<scroll::Endian>>::Error;
     fn try_into_ctx(self, dest: &mut [u8], _ctx: scroll::Endian) -> Result<usize, Self::Error> {
-        let mut size = 0;
-        dest.gwrite_with(self.0, &mut size, E::get_val())?;
-        Ok(size)
+        self.0.try_into_ctx(dest, E::get_val())
     }
 }
 
@@ -180,23 +237,33 @@ impl<Ctx, T, E> MeasureWith<Ctx> for EndianWrapper<T, E> where T: MeasureWith<sc
     }
 }
 
-// This can't be fully generic either because of limitations and possible trait impl conflicts.
-impl<Endian> From<EndianWrapper<u16, Endian>> for u16 {
-    fn from(src: EndianWrapper<Self, Endian>) -> Self {
-        src.0
+impl<T, E> IntoInner for EndianWrapper<T, E>
+    where T: IntoInner {
+    type Inner = <T as IntoInner>::Inner;
+    fn into_inner(self) -> Self::Inner {
+        self.0.into_inner()
+    }
+}
+
+impl<T, E> FromInner for EndianWrapper<T, E> where T: FromInner {
+    type Inner = <T as FromInner>::Inner;
+    fn from_inner(inner: Self::Inner) -> Self {
+        EndianWrapper(T::from_inner(inner), PhantomData)
     }
 }
 
 // for the sake of usage as a Length in LengthData
-impl<Endian> TryFrom<EndianWrapper<u16, Endian>> for usize {
-    type Error = <usize as TryFrom<u16>>::Error;
-    fn try_from(src: EndianWrapper<u16, Endian>) -> Result<Self, Self::Error> {
+impl<T, Endian> TryFrom<EndianWrapper<T, Endian>> for usize
+    where usize: TryFrom<T> {
+    type Error = <usize as TryFrom<T>>::Error;
+    fn try_from(src: EndianWrapper<T, Endian>) -> Result<Self, Self::Error> {
         src.0.try_into()
     }
 }
 
-impl<Endian> TryFrom<usize> for EndianWrapper<u16, Endian> {
-    type Error = <u16 as TryFrom<usize>>::Error;
+impl<T, Endian> TryFrom<usize> for EndianWrapper<T, Endian>
+    where T: TryFrom<usize> {
+    type Error = <T as TryFrom<usize>>::Error;
     fn try_from(src: usize) -> Result<Self, Self::Error> {
         Ok(EndianWrapper(src.try_into()?, PhantomData))
     }
@@ -206,24 +273,52 @@ impl<Endian> TryFrom<usize> for EndianWrapper<u16, Endian> {
 
 #[derive(Pread, Pwrite)]
 struct Example {
-    big: EndianWrapper<u16, BigEndian>,
-    little: EndianWrapper<u16, LittleEndian>,
+    big: EndianWrapper<D<u16>, BigEndian>,
+    little: EndianWrapper<D<u16>, LittleEndian>,
     var: LengthData<UTF16<LittleEndian>, EndianWrapper<u16, BigEndian>>
+}
+
+#[derive(Debug)]
+struct ExampleUnwrapped {
+    big: u16,
+    little: u16,
+    var: String
+}
+
+impl From<Example> for ExampleUnwrapped {
+    fn from(src: Example) -> ExampleUnwrapped {
+        ExampleUnwrapped {
+            big: src.big.into_inner(),
+            little: src.little.into_inner(),
+            var: src.var.into_inner()
+        }
+    }
+}
+
+impl From<ExampleUnwrapped> for Example {
+    fn from(src: ExampleUnwrapped) -> Example {
+        Example {
+            big: EndianWrapper::from_inner(src.big),
+            little: EndianWrapper::from_inner(src.little),
+            var: LengthData::from_inner(src.var)
+        }
+    }
 }
 
 fn main() {
     let src = [0u8, 42, 42, 0, 0, 10, 0x48, 0, 0x65, 0, 0x6c, 0, 0x6c, 0, 0x6f, 0];
     let mut dest = vec![0; src.len()];
     let example: Example = src.pread(0).unwrap();
-    let big: u16 = example.big.clone().into();
-    let little: u16 = example.little.clone().into();
-    let var: String = example.var.clone().into();
+    let unwrapped: ExampleUnwrapped = example.into();
+
+    println!("{:?}", unwrapped);
+
+    assert_eq!(unwrapped.big, 42u16);
+    assert_eq!(unwrapped.little, 42u16);
+    assert_eq!(unwrapped.var, "Hello".to_owned());
+
+    let example: Example = unwrapped.into();
     dest.pwrite(example, 0).unwrap();
 
-    println!("Example {{ big: {}, little: {}, var: {} }}", big, little, var);
-
-    assert_eq!(big, 42u16);
-    assert_eq!(little, 42u16);
-    assert_eq!(var, "Hello".to_owned());
     assert_eq!(src.as_ref(), dest.as_slice());
 }
